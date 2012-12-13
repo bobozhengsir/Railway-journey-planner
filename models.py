@@ -10,6 +10,7 @@ from mongoengine.queryset import (QuerySet, QuerySetManager,
 from mongoengine.connection import ConnectionError
 
 from json import dumps as json_dumps, loads as json_lds
+from utils import connect_time
 
 DB_NAME = 'mytimetable'
 PLAN_PROPERTY = {"Direct_Plan": 0, "Tranfer_One_Plan": 1, "Tranfer_Two_Plan": 2}
@@ -145,9 +146,9 @@ class Direct_Plan(object):
 
 
 	def __getStartTime(self):
-		return self.train.edges[self.ori_sta_seq - 1].depart_time
+		return self.train.edges[self.ori_sta_seq - 1].depart_time or self.train.edges[self.ori_sta_seq - 1].arrive_time
 	def __getEndTime(self):
-		return self.train.edges[self.dest_sta_seq - 1].arrive_time
+		return self.train.edges[self.dest_sta_seq - 1].arrive_time or self.train.edges[self.dest_sta_seq - 1].depart_time
 	def __getDepartDays(self):
 		return self.train.edges[self.dest_sta_seq - 1].depart_days - self.train.edges[self.ori_sta_seq - 1].depart_days
 	def __getDistance(self):
@@ -218,20 +219,31 @@ class Tranfer_One_Plan(object):
 	def to_json(self):
 		return json_dumps(self.to_dict(), indent=4)
 
+class Three_Direct(object):
+	"""docstring for Direct_Plus_Tranfer_One"""
+	def __init__(self, first_direct, second_tranfer_one ):
+		super(Direct_Plus_Tranfer_One, self).__init__()
+		self.first_direct = first_direct	# isinstance Direct_Plan
+		self.second_tranfer_one = second_tranfer_one  # isinstance Tranfer_One_Plan
+		
+
 class Tranfer_Two_Plan(object):
 	"""docstring for Tranfer_Two_Plan"""
-	def __init__(self,first_train, ori_sta_seq, second_train, dest_sta_seq, transit_sta_seqs,transit_stas, transit_time, if_city_same=False):
+	def __init__(self, args):
 		#super(Tranfer_One_Plan, self).__init__()
 		#self.dest_sta_name = dest_sta_name
-		self.if_city_same = if_city_same #if it is True,transit_sta is tuple(a,b).if it's false,transit_sta is one sta.
-		self.transit_time = transit_time
-		self.first_direct = Direct_Plan(ori_sta_seq, transit_sta_seqs[0], first_train)
-		self.second_direct = Direct_Plan(transit_sta_seqs[1], dest_sta_seq, second_train)
-		self.transit_sta = transit_stas #same city has two transit_sta
-		self.distance = self.first_direct.distance + self.second_direct.distance
+		#self.if_city_same = if_city_same #if it is True,transit_sta is tuple(a,b).if it's false,transit_sta is one sta.
+		
+		self.first_direct = args[0]
+		self.second_direct = args[1]
+		self.third_direct = args[2]
+		self.transit_time = connect_time(args[0].end_time, args[1].start_time) + connect_time(args[1].end_time, args[2].start_time)
+		self.transit_sta = [args[1].start_station_name, args[1].end_station_name]#transit_stas #same city has two transit_sta
+		self.distance = self.first_direct.distance + self.second_direct.distance + self.third_direct.distance
 		self.start_time = self.first_direct.start_time
-		self.end_time = self.second_direct.end_time
-		self.travel_time = self.first_direct.travel_time + self.second_direct.travel_time + transit_time
+		self.end_time = self.third_direct.end_time
+		self.travel_time = self.first_direct.travel_time + self.second_direct.travel_time +\
+							self.third_direct.travel_time + self.transit_time
 
 	def to_dict(self):
 		return {
@@ -239,17 +251,17 @@ class Tranfer_Two_Plan(object):
 			"end_time": self.end_time,
 			"start_station_name": self.first_direct.start_station_name,
 			#"start_station_code": "BBH",
-			"end_station_name": self.second_direct.end_station_name,
+			"end_station_name": self.third_direct.end_station_name,
 			#"end_station_code": "AFW",
 			"price": 0,
 			"travel_time": self.travel_time,
 			"distance": self.distance,
 			"comfort": "null",
-			"if_city_same": self.if_city_same,
+			#"if_city_same": self.if_city_same,
 			"transit_sta": self.transit_sta,
 			"transit_time": self.transit_time,
-			"plan_property": PLAN_PROPERTY["Tranfer_One_Plan"],
-			"edges": [self.first_direct.to_dict(), self.second_direct.to_dict()],
+			"plan_property": PLAN_PROPERTY["Tranfer_Two_Plan"],
+			"edges": [self.first_direct.to_dict(), self.second_direct.to_dict(), self.third_direct.to_dict()],
 				       
 		}
 			
@@ -287,4 +299,3 @@ try:
 except ConnectionError: 
 	print "Cannot connect to the database"
 	sys.exit(1)
- 

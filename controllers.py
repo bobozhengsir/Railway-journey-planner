@@ -1,19 +1,20 @@
 #!/usr/bin/env python
 #-*- coding: utf-8 -*-
-import mimetypes
-import cStringIO as StringIO
+#import mimetypes
+#import cStringIO as StringIO
 import sys
 from bottle import request, response, get, post, route, Bottle, error
 from bottle import static_file, redirect, HTTPResponse
 from bottle import mako_view as view, mako_template as template
 from PIL import Image
-from models import Stop_time, Station, Stop_edges, Train, Direct_Plan, Tranfer_One_Plan, Plans
+from models import Stop_time, Station, Stop_edges, Train, Direct_Plan, Tranfer_One_Plan, Tranfer_Two_Plan, Plans
+from utils import connect_time
 import json
 from operator import itemgetter, attrgetter
-import memcache
-from hashlib import md5
+# import memcache
+# from hashlib import md5
 
-MC = memcache.Client(['127.0.0.1:11211'],debug=0)
+# MC = memcache.Client(['127.0.0.1:11211'], debug=0)
 
 
 def connect_trains(sta_name, type_time):
@@ -22,42 +23,34 @@ def connect_trains(sta_name, type_time):
 		start_station:"depart_time" ,start_station:"arrive_time" (==>None)
 	"""
 	if not isinstance(sta_name, unicode):
-		sta_name = unicode(sta_name,'utf-8') 
+		sta_name = unicode(sta_name, 'utf-8') 
 	all_trains = {}
-	for post in Stop_time.objects(__raw__={"sta_name":sta_name,type_time:{'$ne':None}}).only("seq_no","train_no"):
-		all_trains[post.train_no] = post.seq_no #next can plus infomations
+
+	for post in Stop_time.objects(__raw__ = {"sta_name": sta_name,
+				type_time: {'$ne': None}}).only("seq_no", "train_no"):
+		all_trains[post.train_no] = post.seq_no # next can plus infomations
 
 	return all_trains
 
 def save_direct_trains(start_trains, end_trains):
 	"""save direct edges
+
 	"""
 	direct_plans = []
 	if len(start_trains) <= len(end_trains):
 		for (k,v) in start_trains.items():
-			if k in end_trains and v < end_trains[k]: #direct
+			if k in end_trains and v < end_trains[k]: # direct
 				k_train = Train.objects(train_no=k).get()
 				direct_plan = Direct_Plan(v, end_trains[k], k_train)
-				direct_plans.append(direct_plan)
-			
-			
+				direct_plans.append(direct_plan)		
 	else:
 		for (k,v) in end_trains.items():
-			if k in start_trains and v > start_trains[k]: #direct
+			if k in start_trains and v > start_trains[k]: # direct
 				k_train = Train.objects(train_no=k).get()
 				direct_plan = Direct_Plan(start_trains[k], v, k_train)
-				direct_plans.append(direct_plan)
-			
-			
-	#if direct_plans:
+				direct_plans.append(direct_plan)		
+	# if direct_plans:
 	return direct_plans
-
-def connect_time(start_arrive_time,end_depart_time):
-	"""return connection minutes at one station"""
-	if int(start_arrive_time) < int(end_depart_time):
-		return int(end_depart_time)/100*60 + int(end_depart_time)%100 - int(start_arrive_time)/100*60 - int(start_arrive_time)%100
-	else:
-		return 1440 + int(end_depart_time)/100*60 + int(end_depart_time)%100 - int(start_arrive_time)/100*60 - int(start_arrive_time)%100
 
 
 def save_direct_plans(start_sta, end_sta):
@@ -76,7 +69,6 @@ def save_direct_plans(start_sta, end_sta):
 
 	return direct_plans,start_trains,end_trains
 	
-
 def save_tranfer_one_plans(start_trains, end_trains):
 	"""save one tranfer plans """
 	tranfer_one_plans = [] #save tranfer result
@@ -124,13 +116,13 @@ def save_tranfer_one_plans(start_trains, end_trains):
 				#union_sets_filter = sorted(union_sets_all.items(), key=lambda x: x[1])
 				transit_time = max(union_sets_connct_time)
 				for i,x in enumerate(union_sets_connct_time):
-					if x==transit_time and i<len(set_union):
+					if x == transit_time and i<len(set_union):
 						transit_sta = union_sets_sta[i]
 						transit_sta_seqs = (sl[transit_sta].seq_no, el[transit_sta].seq_no)
 						tranfer_one = Tranfer_One_Plan(train_one[0],train_one[1], train_two[0],train_two[1], transit_sta_seqs, transit_sta,transit_time)
 						tranfer_one_plans.append(tranfer_one)
 						break
-					elif x==transit_time and i>=len(set_union):
+					elif x == transit_time and i>=len(set_union):
 						if_city_same = True
 						transit_stas = union_sets_sta[i]
 						transit_sta_seqs = (sl[transit_stas[0]].seq_no, el[transit_stas[1]].seq_no)
@@ -141,10 +133,96 @@ def save_tranfer_one_plans(start_trains, end_trains):
 						continue
 				
 
-	return tranfer_one_plans#,start_trains,end_trains
+	return tranfer_one_plans#start_trains_seqs,end_trains
 
 
+
+
+def save_tranfer_all_plans(start_trains, end_trains):
+	"""save one tranfer plans """
+	#tranfer_one_plans = [] #save tranfer result
+	tranfer_two_plans = [] # add new
+	trains = lambda train:[(t,train[t.train_no]) for t in Train.objects(__raw__={"train_no":{"$in":train.keys()}})]
+
+	start_train_seqs = trains(start_trains)
+	start_sta_info =lambda d: dict([(s.sta_name, s) for s in d[0].edges if s.seq_no > d[1]]) #s.arrive_time,s.city_same
+	start_trains_stas_v = map(start_sta_info, start_train_seqs)
+
+	end_train_seqs = trains(end_trains)
+	end_sta_info =lambda d: dict([(s.sta_name, s) for s in d[0].edges if s.seq_no < d[1]])#s.depart_time,s.city_same
+	end_trains_stas_ev = map(end_sta_info, end_train_seqs)
 		
+	for i,sl in enumerate(start_trains_stas_v):
+		set_one = set(sl.keys())
+		train_one = start_train_seqs[i]
+		for j,el in enumerate(end_trains_stas_ev):
+			train_two = end_train_seqs[j]
+			if len(train_one[0].cross_bureaus) == 1 and len(train_two[0].cross_bureaus) == 1:
+				break #tranfer is not taking place in two bureau trains
+			set_two = set(el.keys())
+			"""
+			set_union = set_one & set_two
+			same_city_sta = [(st1,st2) for st1 in set_one - set_union for st2 in set_two - set_union \
+							if sl[st1].city_same and sl[st1].city_same==el[st2].city_same]
+			
+			union_sets_sta = []
+			union_sets_sta = list(set_union)
+			union_sets_sta.extend(same_city_sta)
+
+			if union_sets_sta:
+				try:
+					#union_sets_sta_dict = [] 
+					#union_sets_sta_dict = zip(union_sets_sta, union_sets_sta)
+					#union_sets_sta_dict.extend(same_city_sta)
+					union_sets_connct_time = []
+					union_sets_connct_time = [connect_time(sl[t].arrive_time, el[t].depart_time) for t in set_union]
+					union_sets_connct_time.extend([connect_time(sl[t1].arrive_time, el[t2].depart_time) for (t1,t2) in same_city_sta])
+				except TypeError, e:
+					print "type error"
+				except Exception, ex:
+					print "other error"
+					
+				#union_sets_all = dict(zip(union_sets_sta,union_sets_connct_time))
+				#union_sets_filter = sorted(union_sets_all.items(), key=lambda x: x[1])
+				transit_time = max(union_sets_connct_time)
+				for i,x in enumerate(union_sets_connct_time):
+					if x == transit_time and i<len(set_union):
+						transit_sta = union_sets_sta[i]
+						transit_sta_seqs = (sl[transit_sta].seq_no, el[transit_sta].seq_no)
+						tranfer_one = Tranfer_One_Plan(train_one[0],train_one[1], train_two[0],train_two[1], transit_sta_seqs, transit_sta,transit_time)
+						tranfer_one_plans.append(tranfer_one)
+						break
+					elif x == transit_time and i>=len(set_union):
+						if_city_same = True
+						transit_stas = union_sets_sta[i]
+						transit_sta_seqs = (sl[transit_stas[0]].seq_no, el[transit_stas[1]].seq_no)
+						tranfer_one = Tranfer_One_Plan(train_one[0],train_one[1], train_two[0],train_two[1], transit_sta_seqs, transit_stas,transit_time,if_city_same)
+						tranfer_one_plans.append(tranfer_one)
+						break
+					else:
+						continue
+			"""
+			
+			for x in set_one:
+				for y in set_two:
+					direct_one = Direct_Plan( train_one[1], sl[x].seq_no , train_one[0] )
+					direct_three = Direct_Plan( el[y].seq_no,  train_two[1], train_two[0] )
+					mid_directs,a,b = save_direct_plans(x, y)
+					if direct_one and direct_three and mid_directs :
+						tranfer_two_plans.extend([Tranfer_Two_Plan( [direct_one, second, direct_three] ) for second in mid_directs])
+						
+
+	return tranfer_two_plans#,start_trains_seqs,end_trains
+
+# add save_tranfer_two_plans 2012-12-13 1:23PM
+def save_tranfer_two_plans( start_sta, start_trains_kv, end_sta, end_trains_kv ):
+	"""
+	tranfer two plan includes one direct plan and tranfer one plan
+	"""
+	#results,start_trains,end_trains = save_direct_plans(start_sta, end_sta)
+	direct_train = Train.objects( train_no = start_trains_kv)
+	#k_train = Train.objects(train_no=k).get()
+	#direct_plan = Direct_Plan(v, end_trains[k], k_train)
 
 
 # route
@@ -172,7 +250,6 @@ def gettrain(train_code):
 	else:
 		response.content_type = 'application/json'
 		return json.dumps(train.to_dict(), indent=4) 
-
 
 @webapp.route('/stations')
 def stations():
@@ -213,7 +290,6 @@ def search_submit(start_sta, end_sta, preference):
 		response.content_type = 'application/json'
 		return json.dumps(plans.to_dict(), indent=4) 
 
-
 if __name__ == '__main__':
 	import time
 	import sys
@@ -222,7 +298,9 @@ if __name__ == '__main__':
 	start_time = time.time()
 	results,start_trains,end_trains = save_direct_plans(start_sta, end_sta)
 	if not results:
-		results = save_tranfer_one_plans(start_trains, end_trains)
+		results = save_tranfer_one_plans( start_trains, end_trains )
+	if not results:
+		results = save_tranfer_all_plans( start_trains, end_trains )
 	result = sorted(results, key=attrgetter('travel_time','distance'))
 	plans = Plans(start_sta, end_sta,edges=result[:1])
 	
@@ -230,8 +308,3 @@ if __name__ == '__main__':
 
 	print elapsed
 	print plans.to_json()
-
-	
-
-
-
